@@ -171,3 +171,98 @@ def test_product_form_delete_removes_target_and_preserves_other_item(client):
     assert b"REMAIN-001" in response.data
     assert client.get("/products").get_json() == [other]
     assert client.get(f"/products/{product['id']}").status_code == 404
+
+
+def test_stock_level_follows_incoming_outgoing_and_zero_balance(client):
+    """P6: follow-up reads agree after each operation, including exact depletion."""
+    product = create_product(client)
+    pid = product["id"]
+    other = create_product(client, name="Unchanged Item", sku="OTHER-001")
+    stock = client.get(f"/products/{pid}/stock-level")
+    assert stock.status_code == 200
+    assert stock.get_json() == {"product_id": pid, "quantity_on_hand": 10}
+
+    for tx_type, quantity, expected in [("IN", 5, 15), ("OUT", 3, 12), ("OUT", 12, 0)]:
+        response = client.post("/transactions", json={
+            "product_id": pid, "type": tx_type, "quantity": quantity,
+        })
+        assert response.status_code == 201
+        assert response.get_json()["product_id"] == pid
+        stock = client.get(f"/products/{pid}/stock-level")
+        assert stock.status_code == 200
+        assert stock.get_json() == {"product_id": pid, "quantity_on_hand": expected}
+        assert client.get(f"/products/{pid}").get_json()["quantity_on_hand"] == expected
+        assert client.get(f"/products/{other['id']}").get_json() == other
+
+
+def test_stock_level_reflects_manual_quantity_correction(client):
+    """P4/P6: correcting stock through PUT is immediately visible (R5/R6/R16)."""
+    product = create_product(client)
+    pid = product["id"]
+    response = client.put(f"/products/{pid}", json={"quantity_on_hand": 4})
+    assert response.status_code == 200
+    assert response.get_json() == {**product, "quantity_on_hand": 4}
+    stock = client.get(f"/products/{pid}/stock-level")
+    assert stock.status_code == 200
+    assert stock.get_json() == {"product_id": pid, "quantity_on_hand": 4}
+    assert client.get("/products").get_json() == [{**product, "quantity_on_hand": 4}]
+
+
+def test_stock_level_for_missing_product_preserves_inventory(client):
+    """P6: querying a missing item does not invent stock or modify inventory."""
+    product = create_product(client)
+    response = client.get("/products/9999/stock-level")
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "Product not found"}
+    assert client.get("/products").get_json() == [product]
+
+
+@pytest.mark.parametrize("quantity,expected_low", [(0, True), (2, True), (3, True), (4, False)])
+def test_low_stock_includes_zero_below_and_equal_threshold_only(client, quantity, expected_low):
+    """P7: R2 detection uses at-or-below reorder level, including equality."""
+    product = create_product(client, quantity_on_hand=quantity, reorder_level=3)
+    response = client.get("/products/low-stock")
+    assert response.status_code == 200
+    assert response.get_json() == ([product] if expected_low else [])
+    assert client.get(f"/products/{product['id']}").get_json() == product
+
+
+def test_low_stock_empty_inventory_has_no_alert_candidates(client):
+    """P7: detection returns no fabricated products when inventory is empty."""
+    response = client.get("/products/low-stock")
+    assert response.status_code == 200
+    assert response.get_json() == []
+    assert client.get("/products").get_json() == []
+
+
+def test_low_stock_selects_each_products_own_reorder_level(client):
+    """P7: mixed products use independent thresholds and retain full fields."""
+    low = create_product(client, quantity_on_hand=8, reorder_level=10)
+    high = create_product(client, name="High Stock", sku="HIGH-001", quantity_on_hand=8, reorder_level=2)
+    equal = create_product(client, name="At Threshold", sku="EQUAL-001", quantity_on_hand=5, reorder_level=5)
+    response = client.get("/products/low-stock")
+    assert response.status_code == 200
+    found = response.get_json()
+    assert len(found) == 2
+    assert {p["id"]: p for p in found} == {low["id"]: low, equal["id"]: equal}
+    assert client.get(f"/products/{high['id']}").get_json() == high
+
+
+def test_low_stock_recomputes_after_movements_and_threshold_updates(client):
+    """P7: detection reflects changes rather than returning a stale candidate list."""
+    product = create_product(client, quantity_on_hand=4, reorder_level=3)
+    pid = product["id"]
+    assert client.get("/products/low-stock").get_json() == []
+    out = client.post("/transactions", json={"product_id": pid, "type": "OUT", "quantity": 1})
+    assert out.status_code == 201
+    assert client.get("/products/low-stock").get_json() == [{**product, "quantity_on_hand": 3}]
+    incoming = client.post("/transactions", json={"product_id": pid, "type": "IN", "quantity": 2})
+    assert incoming.status_code == 201
+    assert client.get("/products/low-stock").get_json() == []
+    update = client.put(f"/products/{pid}", json={"reorder_level": 5})
+    expected = {**product, "quantity_on_hand": 5, "reorder_level": 5}
+    assert update.status_code == 200
+    assert update.get_json() == expected
+    assert client.get("/products/low-stock").get_json() == [expected]
+    assert client.delete(f"/products/{pid}").status_code == 204
+    assert client.get("/products/low-stock").get_json() == []
