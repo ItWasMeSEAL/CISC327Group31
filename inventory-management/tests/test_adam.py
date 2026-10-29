@@ -29,12 +29,12 @@ def record(client, product, kind, quantity, supplier=None):
     return response.get_json()
 
 
-@pytest.mark.skip(reason="The system runs locally over flask, this cannot be tested.")
+@pytest.mark.skip(reason="R10: The system runs locally over flask, this cannot be tested.")
 def test_r10_long_timeout_on_slow_connection():
     # R10 cannot be tested on a flask client setup, the requirement is skipped and the reason is outputted.
     pass
 
-@pytest.mark.skip(reason="There is no scanner integration built into the system, and no physical scanner to test it with anyways.")
+@pytest.mark.skip(reason="R11: There is no scanner integration built into the system, and no physical scanner to test it with anyways.")
 def test_r11_scan_receives_shipment_without_extra_confirmation():
     # There's no way to confirm if the system works with the scanner without real external hardware.
     pass
@@ -105,3 +105,56 @@ def test_r17_store_and_operate_on_500_products_and_12_suppliers(client):
     record(client, products[-1], "IN", 3, suppliers[-1])
     assert client.get(f"/products/{products[-1]['id']}/stock-level").get_json()["quantity_on_hand"] == 502
     assert len(client.get("/products").get_json()) == 500
+
+'''
+Checking functionality related to suppliers
+'''
+def test_supplier_list_creation_and_retrieval(client):
+    # This function checks if suppliers can be created, listed and accessed individually.
+    # It also checks that each supplier has a different ID and the correct information.
+    assert client.get("/suppliers").get_json() == []
+    a, b = make_supplier(client, "Alpha"), make_supplier(client, "Beta")
+    assert a["id"] != b["id"]
+    assert a["name"] == "Alpha" and a["contact_email"] == "test@example.com"
+    assert client.get(f"/suppliers/{a['id']}").get_json() == a
+    assert {s["id"] for s in client.get("/suppliers").get_json()} == {a["id"], b["id"]}
+
+
+def test_supplier_partial_update_preserves_name(client):
+    # This function checks if a supplier's email can be updated without changing its name.
+    s = make_supplier(client)
+    r = client.put(f"/suppliers/{s['id']}", json={"contact_email": "new@example.com"})
+    assert r.status_code == 200
+    assert client.get(f"/suppliers/{s['id']}").get_json() == {**s, "contact_email": "new@example.com"}
+
+
+def test_supplier_delete_removes_only_selected_supplier(client):
+    # This function checks if a supplier can be deleted without deleting another supplier.
+    # Trying to access the deleted supplier should return an error.
+    a, b = make_supplier(client, "A"), make_supplier(client, "B")
+    assert client.delete(f"/suppliers/{a['id']}").status_code == 204
+    assert client.get(f"/suppliers/{a['id']}").get_json() == {"error": "Supplier not found"}
+    assert client.get("/suppliers").get_json() == [b]
+
+
+@pytest.mark.parametrize("method", ["get", "put", "delete"])
+def test_supplier_unknown_id(client, method):
+    # By parametrizing, this function tests viewing, updating and deleting a supplier that does not exist.
+    # Each operation should return HTTP 404 and a message saying the supplier was not found.
+    r = getattr(client, method)("/suppliers/9999", **({"json": {"name": "New"}} if method == "put" else {}))
+    assert r.status_code == 404
+    assert r.get_json() == {"error": "Supplier not found"}
+
+
+def test_supplier_products_include_only_distinct_received_products(client):
+    # This function checks if a supplier's product list only contains products received from that supplier.
+    # Receiving the same product twice should not duplicate it, and outgoing transactions should not add products to the list.
+    a, b = make_supplier(client, "A"), make_supplier(client, "B")
+    p, q = make_product(client, "P"), make_product(client, "Q")
+    record(client, p, "IN", 2, a)
+    record(client, p, "IN", 3, a)
+    record(client, q, "IN", 1, b)
+    record(client, q, "OUT", 1, a)
+    rows = client.get(f"/suppliers/{a['id']}/products").get_json()
+    assert len(rows) == 1 and rows[0]["id"] == p["id"]
+    assert rows[0]["quantity_on_hand"] == 25
