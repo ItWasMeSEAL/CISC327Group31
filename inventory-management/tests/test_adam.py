@@ -107,7 +107,7 @@ def test_r17_store_and_operate_on_500_products_and_12_suppliers(client):
     assert len(client.get("/products").get_json()) == 500
 
 '''
-Checking functionality related to suppliers
+Checking functionality related to suppliers.
 '''
 def test_supplier_list_creation_and_retrieval(client):
     # This function checks if suppliers can be created, listed and accessed individually.
@@ -158,3 +158,65 @@ def test_supplier_products_include_only_distinct_received_products(client):
     rows = client.get(f"/suppliers/{a['id']}/products").get_json()
     assert len(rows) == 1 and rows[0]["id"] == p["id"]
     assert rows[0]["quantity_on_hand"] == 25
+
+
+    '''
+    Checking functionality related to transactions.
+    '''
+def test_outgoing_stock_can_reach_zero(client):
+    # This function checks if removing all available units leaves the product with zero stock.
+    p = make_product(client, quantity=2)
+    record(client, p, "OUT", 2)
+    assert client.get(f"/products/{p['id']}/stock-level").get_json()["quantity_on_hand"] == 0
+
+
+def test_invalid_transaction_type_leaves_stock_and_history_unchanged(client):
+    # This function checks if a transaction with an invalid type is rejected.
+    # The rejected transaction should not change the stock quantity or appear in transaction history.
+    p = make_product(client)
+    r = client.post("/transactions", json={"product_id": p["id"], "type": "INVALID", "quantity": 2})
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "type must be IN or OUT"
+    assert client.get("/transactions").get_json() == []
+    assert client.get(f"/products/{p['id']}/stock-level").get_json()["quantity_on_hand"] == 20
+
+
+def test_missing_transaction_product_does_not_create_history(client):
+    # This function checks if a transaction for a product that does not exist is rejected.
+    # It should return HTTP 404 without adding anything to transaction history.
+    r = client.post("/transactions", json={"product_id": 9999, "type": "IN", "quantity": 1})
+    assert r.status_code == 404
+    assert r.get_json() == {"error": "Product not found"}
+    assert client.get("/transactions").get_json() == []
+
+
+def test_transaction_history_filters_by_supplier(client):
+    # This function checks if filtering by a supplier only returns that supplier's transactions.
+    # Two suppliers are used so transactions from the other supplier should be excluded.
+    a, b = make_supplier(client, "A"), make_supplier(client, "B")
+    p = make_product(client)
+    expected = record(client, p, "IN", 1, a)
+    record(client, p, "IN", 1, b)
+    assert client.get(f"/transactions?supplier_id={a['id']}").get_json() == [expected]
+
+
+def test_transaction_history_filters_by_product_not_supplier(client):
+    # This function checks if filtering by a product only returns transactions for that product.
+    # Different product and supplier IDs are used to expose a bug where the filter checks the supplier ID instead.
+    other, wanted = make_product(client, "OTHER"), make_product(client, "WANTED")
+    supplier = make_supplier(client)
+    expected = record(client, wanted, "IN", 1, supplier)
+    record(client, other, "IN", 1, supplier)
+    assert wanted["id"] != supplier["id"]
+    assert client.get(f"/transactions?product_id={wanted['id']}").get_json() == [expected]
+
+
+def test_home_page_contains_inventory_navigation(client):
+    # This function checks if the home page loads with the correct heading.
+    # It also checks that links to the products, suppliers and transactions pages are present.
+    r = client.get("/")
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert "Inventory Management System" in html
+    for path in ("/ui/products", "/ui/suppliers", "/ui/transactions"):
+        assert f'href="{path}"' in html
