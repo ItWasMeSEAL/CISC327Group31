@@ -420,6 +420,7 @@ def test_repeated_receipt_does_not_duplicate_records_or_change_stock_again(clien
     saved_transactions = client.get("/transactions").get_json()
     assert len(saved_transactions) == 1
     saved_stock = client.get(f"/products/{product['id']}/stock-level").get_json()
+    assert saved_stock == {"product_id": product["id"], "quantity_on_hand": 14}
     second = client.put(f"/purchase-orders/{order['id']}/receive")
     assert second.status_code == 400
     assert second.get_json() == {"error": "Purchase order already received"}
@@ -460,3 +461,70 @@ def test_receiving_one_order_keeps_other_order_pending(client):
     transactions = client.get("/transactions").get_json()
     assert len(transactions) == 1
     assert transactions[0]["product_id"] == product["id"]
+
+
+@pytest.mark.parametrize("initial,received", [(0, 1), (3, 7)])
+def test_receiving_order_adds_stock_and_records_matching_quantity(client, initial, received):
+    # Check receiving an order adds its quantity, including initially empty stock.
+    product = create_product(client, quantity_on_hand=initial)
+    supplier = create_supplier(client)
+    order = create_purchase_order(client, product, supplier, quantity=received)
+    response = client.put(f"/purchase-orders/{order['id']}/receive")
+    assert response.status_code == 200
+    saved_order = response.get_json()
+    assert saved_order["status"] == "received"
+    assert saved_order["quantity_ordered"] == received
+    assert saved_order["received_date"] is not None
+    assert client.get(f"/purchase-orders/{order['id']}").get_json() == saved_order
+    expected_product = {**product, "quantity_on_hand": initial + received}
+    assert client.get(f"/products/{product['id']}").get_json() == expected_product
+    assert client.get(f"/products/{product['id']}/stock-level").get_json() == {
+        "product_id": product["id"], "quantity_on_hand": initial + received,
+    }
+    transactions = client.get("/transactions").get_json()
+    assert len(transactions) == 1
+    transaction = transactions[0]
+    assert transaction["product_id"] == product["id"]
+    assert transaction["supplier_id"] == supplier["id"]
+    assert transaction["type"] == "IN"
+    assert transaction["quantity"] == received
+    assert transaction["transaction_date"] == saved_order["received_date"]
+
+
+def test_receiving_two_orders_adds_to_current_stock_only_for_target_product(client):
+    # Check separate receipts add together without changing another product.
+    product = create_product(client)
+    other = create_product(client, name="Other Product", sku="OTHER-RECEIPT")
+    supplier = create_supplier(client)
+    first = create_purchase_order(client, product, supplier, quantity=4)
+    second = create_purchase_order(client, product, supplier, quantity=7)
+    for order, expected_stock in [(first, 14), (second, 21)]:
+        response = client.put(f"/purchase-orders/{order['id']}/receive")
+        assert response.status_code == 200
+        assert response.get_json()["status"] == "received"
+        assert client.get(f"/products/{product['id']}/stock-level").get_json() == {
+            "product_id": product["id"], "quantity_on_hand": expected_stock,
+        }
+        assert client.get(f"/products/{other['id']}").get_json() == other
+    assert client.get(f"/products/{product['id']}").get_json() == {
+        **product, "quantity_on_hand": 21,
+    }
+    transactions = client.get("/transactions").get_json()
+    assert len(transactions) == 2
+    assert [t["quantity"] for t in sorted(transactions, key=lambda t: t["id"])] == [4, 7]
+    assert all(t["product_id"] == product["id"] and t["type"] == "IN" for t in transactions)
+
+
+def test_receiving_order_for_deleted_product_keeps_order_pending(client):
+    # Check a deleted product prevents receipt without changing the order or history.
+    product = create_product(client)
+    supplier = create_supplier(client)
+    order = create_purchase_order(client, product, supplier)
+    assert client.delete(f"/products/{product['id']}").status_code == 204
+    response = client.put(f"/purchase-orders/{order['id']}/receive")
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "Product not found"}
+    assert client.get(f"/purchase-orders/{order['id']}").get_json() == order
+    assert client.get("/purchase-orders").get_json() == [order]
+    assert client.get("/transactions").get_json() == []
+    assert client.get("/products").get_json() == []

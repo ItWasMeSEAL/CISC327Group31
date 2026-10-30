@@ -60,9 +60,14 @@ app working without a REST client, and calls the same in-memory store.
     - `/transactions?product_id=2` — return transactions for product 2.
     - `/transactions?supplier_id=1` — return transactions from supplier 1.
     - `/transactions?product_id=2&supplier_id=1` — return transactions matching both IDs.
+| GET | `/transactions?product_id=&supplier_id=` | Look up transactions |
+| GET | `/purchase-orders` | List purchase orders |
+| POST | `/purchase-orders` | Create a pending order (`supplier_id`, `product_id`, `quantity_ordered`) |
+| GET | `/purchase-orders/<id>` | Get one purchase order |
+| PUT | `/purchase-orders/<id>/receive` | Receive an order, add its quantity to stock, and record an IN transaction |
 
 ## Tests
 
 ```bash
-pytest
+python -m pytest -v
 ```
