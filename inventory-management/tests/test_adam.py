@@ -220,3 +220,48 @@ def test_home_page_contains_inventory_navigation(client):
     assert "Inventory Management System" in html
     for path in ("/ui/products", "/ui/suppliers", "/ui/transactions"):
         assert f'href="{path}"' in html
+
+
+
+
+def test_transaction_history_filters_by_product_and_supplier(client):
+    # This function checks if using both filters only returns transactions matching both IDs.
+    # Transactions matching only the product or only the supplier should be excluded.
+    other, wanted = make_product(client, "OTHER"), make_product(client, "WANTED")
+    supplier_a = make_supplier(client, "Supplier A")
+    supplier_b = make_supplier(client, "Supplier B")
+
+    expected = record(client, wanted, "IN", 3, supplier_a)
+    record(client, wanted, "IN", 2, supplier_b)
+    record(client, other, "IN", 4, supplier_a)
+
+    response = client.get(
+        f"/transactions?product_id={wanted['id']}"
+        f"&supplier_id={supplier_a['id']}"
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == [expected]
+
+
+def test_product_filter_does_not_match_supplier_id(client):
+    # This function checks that a supplier ID matching the requested product ID does not cause an incorrect match.
+    # The requested product has no transactions, so the result should be empty.
+    wanted = make_product(client, "WANTED")
+    other = make_product(client, "OTHER")
+    supplier = make_supplier(client)
+
+    assert wanted["id"] == supplier["id"]
+    assert other["id"] != wanted["id"]
+
+    transaction = record(client, other, "IN", 3, supplier)
+
+    response = client.get(
+        f"/transactions?product_id={wanted['id']}"
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == []
+
+    # Check that the transaction still exists and was only excluded by the filter.
+    assert client.get("/transactions").get_json() == [transaction]
