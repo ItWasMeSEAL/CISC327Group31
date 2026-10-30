@@ -52,6 +52,10 @@ def receive_purchase_order(po_id):
     if po.status == "received":
         return jsonify({"error": "Purchase order already received"}), 400
 
+    product = store.products.get(po.product_id)
+    if product is None:
+        return jsonify({"error": "Product not found"}), 404
+
     po.status = "received"
     po.received_date = date.today()
 
@@ -65,14 +69,6 @@ def receive_purchase_order(po_id):
         quantity=po.quantity_ordered,
     )
     store.transactions[transaction_id] = transaction
-
-    # BUG: the transaction is recorded but the product's quantity_on_hand is
-    # never updated. Receiving a purchase order should increment stock, but
-    # the line below is intentionally missing:
-    #
-    #   store.products[po.product_id].quantity_on_hand += po.quantity_ordered
-    #
-    # A test that receives a PO and then checks /products/<id>/stock-level
-    # will see the stock unchanged despite the transaction appearing in /transactions.
+    product.quantity_on_hand += po.quantity_ordered
 
     return jsonify(po.to_dict())
