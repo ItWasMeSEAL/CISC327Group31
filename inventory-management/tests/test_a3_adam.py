@@ -69,3 +69,44 @@ def test_low_stock_alert_success_with_stub(client, monkeypatch):
     assert history[0]["type"] == "OUT"
     assert history[0]["quantity"] == 4
     assert response.get_json()["id"] == history[0]["id"]
+
+
+def test_low_stock_alert_correct_arguments_with_mock(client):
+    # Create a product with 9 units and a reorder level of 5.
+    product = make_a3_product(
+        client, sku="MOCK-001", quantity=9, reorder_level=5
+    )
+
+    # Replace the notification service with a mock.
+    with patch(
+        "app.routes.transactions.send_notification",
+        return_value=True
+    ) as mock_send:
+
+        # Remove 5 units, bringing stock down to 4.
+        response = client.post("/transactions", json={
+            "product_id": product["id"],
+            "type": "OUT",
+            "quantity": 5,
+        })
+
+    # Check that the transaction completed successfully.
+    assert response.status_code == 201
+    assert response.get_json()["notification_sent"] is True
+
+    # Check the new product quantity.
+    saved_product = client.get(
+        f"/products/{product['id']}"
+    ).get_json()
+
+    assert saved_product["quantity_on_hand"] == 4
+
+    # Check that the transaction was recorded.
+    assert len(client.get("/transactions").get_json()) == 1
+
+    # Check the exact notification arguments and call count.
+    mock_send.assert_called_once_with(
+        "inventory-staff",
+        "[Harborview Inventory] Low-stock alert",
+        "Product MOCK-001 is low on stock. Only 4 units remain."
+    )
