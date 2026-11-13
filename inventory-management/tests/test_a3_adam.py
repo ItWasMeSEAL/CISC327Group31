@@ -110,3 +110,120 @@ def test_low_stock_alert_correct_arguments_with_mock(client):
         "[Harborview Inventory] Low-stock alert",
         "Product MOCK-001 is low on stock. Only 4 units remain."
     )
+
+
+def test_supplier_form_creates_supplier_visible_in_ui_and_api(client):
+    # Check that the supplier page loads.
+    starting_page = client.get("/ui/suppliers")
+    assert starting_page.status_code == 200
+
+    # Submit the form to create a supplier.
+    response = client.post("/ui/suppliers", data={
+        "name": "Allied Supply",
+        "contact_email": "orders@allied.example",
+    }, follow_redirects=True)
+
+    # Check that the form redirected back to the supplier page.
+    assert response.status_code == 200
+    assert response.request.path == "/ui/suppliers"
+
+    # Check that the new supplier is displayed.
+    assert b"Allied Supply" in response.data
+    assert b"orders@allied.example" in response.data
+
+    # Check that the supplier was saved to the application's store.
+    suppliers = client.get("/suppliers").get_json()
+
+    assert len(suppliers) == 1
+    assert suppliers[0]["name"] == "Allied Supply"
+    assert suppliers[0]["contact_email"] == "orders@allied.example"
+
+
+def test_supplier_form_deletes_only_selected_supplier(client):
+    # Create two suppliers.
+    deleted = make_a3_supplier(
+        client, "Remove Me", "remove@example.com"
+    )
+    remaining = make_a3_supplier(
+        client, "Keep Me", "keep@example.com"
+    )
+
+    # Delete the first supplier through the UI.
+    response = client.post(
+        f"/ui/suppliers/{deleted['id']}/delete",
+        follow_redirects=True,
+    )
+
+    # Check that the request returned to the supplier page.
+    assert response.status_code == 200
+    assert response.request.path == "/ui/suppliers"
+
+    # Check the page displays only the remaining supplier.
+    assert b"Keep Me" in response.data
+    assert b"Remove Me" not in response.data
+
+    # Check the API also shows that only one supplier remains.
+    assert client.get("/suppliers").get_json() == [remaining]
+
+    # Check that the deleted supplier can no longer be retrieved.
+    assert client.get(
+        f"/suppliers/{deleted['id']}"
+    ).status_code == 404
+
+
+def test_supplier_products_omit_deleted_product_with_old_receipt(client):
+    # Create one supplier and two products.
+    supplier = make_a3_supplier(
+        client, "Parts Supplier", "parts@example.com"
+    )
+    removed = make_a3_product(client, sku="OLD-001")
+    kept = make_a3_product(client, sku="NEW-001")
+
+    # Record an incoming transaction for each product.
+    for product in (removed, kept):
+        response = client.post("/transactions", json={
+            "product_id": product["id"],
+            "supplier_id": supplier["id"],
+            "type": "IN",
+            "quantity": 2,
+        })
+        assert response.status_code == 201
+
+    # Delete one product, leaving its transaction history behind.
+    assert client.delete(
+        f"/products/{removed['id']}"
+    ).status_code == 204
+
+    # Request the products received from this supplier.
+    response = client.get(
+        f"/suppliers/{supplier['id']}/products"
+    )
+
+    assert response.status_code == 200
+
+    # Only the product that still exists should be returned.
+    assert response.get_json() == [
+        client.get(f"/products/{kept['id']}").get_json()
+    ]
+
+    # The original transaction history should remain unchanged.
+    assert len(client.get("/transactions").get_json()) == 2
+
+
+def test_supplier_products_for_unknown_supplier_returns_404(client):
+    # Create an existing product.
+    product = make_a3_product(client)
+
+    # Request products for a supplier that does not exist.
+    response = client.get("/suppliers/9999/products")
+
+    # Check the error response.
+    assert response.status_code == 404
+    assert response.get_json() == {
+        "error": "Supplier not found"
+    }
+
+    # Check that the existing product was not changed.
+    assert client.get(
+        f"/products/{product['id']}"
+    ).get_json() == product
