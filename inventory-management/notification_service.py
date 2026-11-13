@@ -23,7 +23,7 @@ SUBJECT_PREFIX = "[Harborview Inventory]"
 
 LOW_STOCK_TEMPLATE = (
     "Product {sku} is low on stock. "
-    "Only {quantity} units remain. "
+    "Only {quantity} units remain."
 )
 
 _notifications = []
