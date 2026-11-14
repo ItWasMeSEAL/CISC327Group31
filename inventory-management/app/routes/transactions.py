@@ -2,6 +2,11 @@ from flask import Blueprint, jsonify, request
 
 from app import store
 from app.models.transaction import Transaction
+from notification_service import (
+    send_notification,
+    SUBJECT_PREFIX,
+    LOW_STOCK_TEMPLATE
+)
 
 transactions_bp = Blueprint("transactions", __name__, url_prefix="/transactions")
 
@@ -18,6 +23,7 @@ def list_transactions():
     return jsonify([t.to_dict() for t in results])
 
 
+
 @transactions_bp.route("", methods=["POST"])
 def create_transaction():
     data = request.get_json()
@@ -27,6 +33,8 @@ def create_transaction():
 
     quantity = data["quantity"]
     tx_type = data["type"]
+#Saving the existing quantity before the transaction.
+    old_quantity = product.quantity_on_hand
 
     if tx_type == "IN":
         product.quantity_on_hand += quantity
@@ -44,4 +52,25 @@ def create_transaction():
         quantity=quantity,
     )
     store.transactions[transaction_id] = transaction
-    return jsonify(transaction.to_dict()), 201
+
+    response_data = transaction.to_dict()
+
+#Notify staff if an outgoing transaction causes stock to reach or fall below the reorder level.
+    if (
+        tx_type == "OUT"
+        and old_quantity > product.reorder_level
+        and product.quantity_on_hand <= product.reorder_level
+    ):
+        notification_sent = send_notification(
+            "inventory-staff",
+            f"{SUBJECT_PREFIX} Low-stock alert",
+            LOW_STOCK_TEMPLATE.format(
+                sku=product.sku,
+                quantity=product.quantity_on_hand
+            )
+        )
+#Even if this notification is not successfully sent, the transaction still succeeds.
+        response_data["notification_sent"] = notification_sent
+
+    return jsonify(response_data), 201
+
