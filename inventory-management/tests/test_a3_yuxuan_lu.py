@@ -1,4 +1,6 @@
-"""Coverage tests for the stock movement page."""
+"""Tests for the stock movement page and low-stock notifications."""
+
+from unittest.mock import patch
 
 import pytest
 
@@ -12,6 +14,7 @@ def product_id(client):
             "sku": "GLOVES-001",
             "unit_price": 8.50,
             "quantity_on_hand": 10,
+            "reorder_level": 5,
         },
     )
     assert response.status_code == 201
@@ -78,3 +81,40 @@ def test_transaction_form_for_unknown_product_leaves_inventory_unchanged(
     assert response.headers["Location"] == "/ui/transactions"
     assert client.get("/transactions").get_json() == []
     assert client.get(f"/products/{product_id}").get_json() == before
+
+
+def test_low_stock_notification_failure_preserves_outgoing_transaction(
+    client, product_id, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.routes.transactions.send_notification",
+        lambda recipient, subject, message: False,
+    )
+    movement = {"product_id": product_id, "type": "OUT", "quantity": 5}
+
+    response = client.post("/transactions", json=movement)
+
+    assert response.status_code == 201
+    result = response.get_json()
+    assert result.pop("notification_sent") is False
+    assert {key: result[key] for key in movement} == movement
+    stock = client.get(f"/products/{product_id}/stock-level").get_json()
+    assert stock["quantity_on_hand"] == 5
+    assert client.get("/transactions").get_json() == [result]
+
+
+def test_outgoing_transaction_above_reorder_level_sends_no_notification(
+    client, product_id
+):
+    movement = {"product_id": product_id, "type": "OUT", "quantity": 4}
+    with patch("app.routes.transactions.send_notification") as mock_send:
+        response = client.post("/transactions", json=movement)
+
+    assert response.status_code == 201
+    result = response.get_json()
+    assert "notification_sent" not in result
+    assert {key: result[key] for key in movement} == movement
+    stock = client.get(f"/products/{product_id}/stock-level").get_json()
+    assert stock["quantity_on_hand"] == 6
+    assert client.get("/transactions").get_json() == [result]
+    mock_send.assert_not_called()
